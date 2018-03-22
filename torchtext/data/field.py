@@ -11,6 +11,8 @@ from .utils import get_tokenizer
 from ..vocab import Vocab, SubwordVocab
 
 
+import pdb
+
 class RawField(object):
     """ Defines a general datatype.
 
@@ -534,6 +536,7 @@ class NestedField(Field):
         old_init_token = self.init_token
         old_eos_token = self.eos_token
         old_fix_len = self.nesting_field.fix_length
+        old_inc_len = self.nesting_field.include_lengths
         # Monkeypatch the attributes
         if self.nesting_field.fix_length is None:
             max_len = max(len(xs) for ex in minibatch for xs in ex)
@@ -541,19 +544,56 @@ class NestedField(Field):
                                      self.nesting_field.eos_token).count(None)
             self.nesting_field.fix_length = fix_len
         self.pad_token = [self.pad_token] * self.nesting_field.fix_length
+        self.nesting_field.include_lengths = False
         if self.init_token is not None:
             self.init_token = self.nesting_field.pad([[self.init_token]])[0]
         if self.eos_token is not None:
             self.eos_token = self.nesting_field.pad([[self.eos_token]])[0]
+        self.nesting_field.include_lengths = True
         # Do padding
-        padded = [self.nesting_field.pad(ex) for ex in minibatch]
-        padded = super(NestedField, self).pad(padded)
+        results = [self.nesting_field.pad(ex) for ex in minibatch]
+        padded = [p for (p,l) in results]
+        if self.include_lengths:
+            padded, lens = super(NestedField, self).pad(padded) # adds init_token, eos_token,
+                                                                # and potentially empty padding rows
+                                                                # lens measures outer - shape: batch
+                                                                
+            # need to update with lengths of init_token, eos_token, and potentially truncation
+            lengths = [l for (p,l) in results] # shape: outer x batch
+            
+            # truncating the lengths info according to the sequences that were truncated
+            # might be able to use lens for this?
+            if self.fix_length is None:
+                max_len = max(len(x) for x in minibatch)
+            else:
+                max_len = self.fix_length + (
+                    self.init_token, self.eos_token).count(None) - 2
+            lengths = lengths[-max_len:] if self.truncate_first else lengths[:max_len]
+
+            #add on the lengths of the init_token, eos_token sequences if applicable
+            if self.init_token:
+                lengths = [[len(self.init_token)] + l for l in lengths]
+            if self.eos_token:
+                lengths = [l + [len(self.eos_token)] for l in lengths]
+
+            #pad the lengths sequences to make them all max_len long
+            lengths = [max(0,max_len-len(l))*[0] + l if self.pad_first
+                       else l + [0]*max(0,max_len-len(l)) for l in lengths]
+
+            #aeq(len(minibatch),len(lengths))
+            pdb.set_trace()
+        else:
+            padded = super(NestedField, self).pad(padded)
+                
         # Restore monkeypatched attributes
         self.nesting_field.fix_length = old_fix_len
         self.pad_token = old_pad_token
         self.init_token = old_init_token
         self.eos_token = old_eos_token
+        self.nesting_field.include_lengths = old_inc_len
 
+        if self.include_lengths:
+            return (padded,lengths)
         return padded
 
     def build_vocab(self, *args, **kwargs):
